@@ -1,0 +1,154 @@
+#!meta
+
+{"kernelInfo":{"defaultKernelName":"csharp","items":[{"name":"csharp"},{"name":"fsharp","languageName":"F#","aliases":["f#","fs"]},{"name":"html","languageName":"HTML"},{"name":"http","languageName":"HTTP"},{"name":"javascript","languageName":"JavaScript","aliases":["js"]},{"name":"mermaid","languageName":"Mermaid"},{"name":"pwsh","languageName":"PowerShell","aliases":["powershell"]},{"name":"value"}]}}
+
+#!fsharp
+
+#r "nuget: Plotly.NET, 5.1.0"
+#r "nuget: Plotly.NET.Interactive, 5.0.0"
+#r "nuget: FSharp.Data, 6.6.0"
+
+#!fsharp
+
+open System.Drawing
+
+let rgbToHsl (color : Color) =
+    // Normalize R, G, B in the range [0..1]
+    let r = float color.R / 255.0
+    let g = float color.G / 255.0
+    let b = float color.B / 255.0
+    
+    // Find min and max values among R, G, B
+    let cMax = max g b |> max r
+    let cMin = min g b |> min r
+    let delta = cMax - cMin
+    
+    // Calculate lightness
+    let l = (cMax + cMin) / 2.0
+    
+    // If all channels are the same, it's a shade of gray => S=0, H=0
+    if delta = 0.0 then
+        (0.0, 0.0, l)
+    else
+        // Calculate saturation
+        let s =
+            if l < 0.5 then
+                delta / (cMax + cMin)
+            else
+                delta / (2.0 - cMax - cMin)
+        
+        // Calculate hue (base formula gives result in [0..6], we turn it into degrees [0..360])
+        let hBase =
+            match cMax with
+            | _ when r = cMax -> (g - b) / delta % 6.0
+            | _ when g = cMax -> (b - r) / delta + 2.0
+            | _               -> (r - g) / delta + 4.0
+        
+        // Convert hBase to degrees: multiply by 60
+        // ensure non-negative by adding 360 if negative
+        let hDegrees =
+            let raw = 60.0 * hBase
+            if raw < 0.0 then raw + 360.0 else raw
+        
+        (hDegrees, s, l)
+
+#!fsharp
+
+open FSharp.Data
+open System.Drawing
+
+let colorsCsvPath =
+    System.IO.Directory.GetCurrentDirectory() + "/MaxMeyer.csv"
+
+type MaxMeyerColor =
+    { Name : string; Code : string; Color : Color }
+
+let colorToHtml color =
+    $"""<p>{color.Name}<br>{color.Code}<br>{color.Color.Name}</p>
+        <svg width="300"
+             height="200">
+          <rect width="300" 
+                height="200" 
+                style="fill:rgb({color.Color.R},{color.Color.G},{color.Color.B})" />
+        </svg>"""
+
+let colorOptionToHtml =
+    function
+    | Some c -> c
+    | None   -> { Name = "Not found"; Code = "N/A"; Color = Color.Black }
+    >> colorToHtml
+
+Formatter.Register<MaxMeyerColor>(colorToHtml, "text/html")
+Formatter.Register<MaxMeyerColor option>(colorOptionToHtml, "text/html")
+Formatter.Register<MaxMeyerColor option array>(
+    (Array.map (colorOptionToHtml >> sprintf """<td>%s</td>""")
+     >> Array.chunkBySize 5
+     >> Array.map (String.concat "" >> sprintf "<tr>%s</tr>")
+     >> String.concat ""
+     >> fun rows -> $"<table>{rows}</table>"), 
+    "text/html")
+
+let colors =
+    CsvFile.Load(colorsCsvPath).Rows
+    |> Seq.map (fun row -> {
+        Name  = if String.IsNullOrEmpty row.Columns[0] then row.Columns[1] else row.Columns[0]
+        Code  = row.Columns[1]
+        Color = Color.FromArgb(0, int row.Columns[2], int row.Columns[3], int row.Columns[4])})
+    |> Array.ofSeq
+    
+let findColor (name : string) =
+    let lowerName =
+        name.ToLower()
+    
+    let tryFindMatchOn f () =
+        Array.tryFind (fun color -> f color lowerName) colors
+
+    colors
+    |> Array.tryFind _.Name.ToLower().Contains(lowerName)
+    |> Option.orElseWith (tryFindMatchOn _.Code.ToLower().Contains)
+    |> Option.orElseWith (tryFindMatchOn _.Color.Name.ToLower().Contains)
+    |> Option.orElseWith (tryFindMatchOn (fun color name -> $"{color.Color.R} {color.Color.G} {color.Color.B}" = name))
+
+let findClosestColors mmColor =
+    let r, g, b =
+        mmColor.Color.R, mmColor.Color.G, mmColor.Color.B
+    
+    colors
+    |> Array.sortBy (fun mmc ->
+        let dR, dG, dB = 
+            mmc.Color.R - r, mmc.Color.G - g, mmc.Color.B - b
+        dR*dR + dG*dG + dB*dB)
+
+let findClosestColorsHsl mmColor =
+    let h, s, l =
+        rgbToHsl mmColor.Color
+
+    colors
+    |> Array.sortBy (fun mmc ->
+        let mh, ms, ml =
+            rgbToHsl mmc.Color
+        let dH = mh - h
+        let dS = ms - s
+        let dL = ml - l
+        dH*dH + dS*dS + dL*dL)
+
+let findClosestColorsHslFromName name =
+    findColor name
+    |> Option.map findClosestColorsHsl
+    |> Option.defaultValue [||]
+
+#!fsharp
+
+let colors = [|
+    "cactus"
+    "MAX19-0943"
+|]
+
+colors
+|> Array.map findColor
+
+#!fsharp
+
+findClosestColorsHslFromName "cactus"
+|> Array.take 60
+|> Array.map Some
